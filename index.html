@@ -1,0 +1,236 @@
+<style>
+	#body{
+		margin:0;
+	}
+
+	#emblem{
+		image-rendering: pixelated;
+		width: 100px;
+		height: 100px;
+	}
+
+	#trinkets{
+		display: grid;
+        grid-template-columns: repeat(5, 1fr);
+		gap: 10px;
+		width: 100%;
+		padding: 10px;
+		background:black;	
+	}
+
+	#trinkets > div{
+		aspect-ratio: 1;
+		background:grey url(https://upload.wikimedia.org/wikipedia/commons/thumb/8/8d/President_Barack_Obama.jpg/192px-President_Barack_Obama.jpg);
+		background-size: contain;
+		background-repeat: no-repeat;
+		background-position: center;
+	}
+
+	#trinkets > :not(.collected){
+		filter: grayscale(100%);
+	}
+
+</style>
+
+<body>
+	<a id="download"></a>
+	<br>
+	<br>
+	<div id="words"></div>
+	<canvas id="emblem" width="10px" height="10px"></canvas>
+
+	<div id="trinkets">
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+		<div></div><div></div><div></div><div></div><div></div>
+	</div>
+</body>
+<script>
+
+"use strict";
+
+function SaveFile(buf){
+	const flags_descriptor = [
+		{name: "is_hard_mode", bits: 1},
+		{name: "health", bits: 2},
+		{name: "spoon_type", bits: 2},
+		{name: "helmet_fragments", bits: 1, count: 3},
+	]
+
+	const TOTAL_TRINKETS = 50;
+	
+	if (String.fromCharCode(...buf.splice(0, 3)) != "FBQ") throw "Magic bytes != FBQ";
+
+	this.version = buf.shift();
+	
+	function dec_name(name){
+		const charset = " abcdefghijklmnopqrstuvwxyz0123456789.,?";
+
+		let result = "";
+
+		for (let i = 0; i < 10; i += 2){
+			let v = name[i] | (name[i+1] << 8);
+
+			if (v > 63999) throw "16-bit Base40 triple exceeded 63999";
+
+			for (let j = 0; j < 3; j++){
+				result += charset[(v / 1600 % 40) | 0];
+				v *= 40;
+			}
+		}
+		return result;
+	}
+
+	this.name = dec_name(buf.splice(0, 10)).trim();
+	this.palette = buf.splice(0, 3);
+
+	function dec_emblem(buf){
+		let result = [];
+		for (let i = 0; i < buf.length; i += 2){
+			let row = [];
+			for (let n = 0; n < 2; n++){
+				let v = buf[i + n];
+
+				if (v > 242) throw "8-bit ternary 5-value exceeded 242";
+
+				for (let j = 0; j < 5; j++){
+					row.push((v / 81 | 0) % 3);
+					v *= 3;
+				}
+			}
+			result.push(row);
+		}
+		return result;
+	}
+	
+	this.emblem = dec_emblem(buf.splice(0, 20));
+	
+	function _dec_flags(buf){
+		let result = {};
+		let offset = 0;
+		
+		for (let i of flags_descriptor){
+			let count = i.count || 1;
+			if (count > 1) result[i.name] = [];
+			
+			for (let j = 0; j < count; j++){
+				let v = 0;
+				
+				for (let bit = 0; bit < i.bits; bit++){
+					v |= ((buf[(bit+offset)>>3] >> (7 - ((bit+offset) & 7))) & 1) << (i.bits - bit-1);
+				}
+
+				offset += i.bits;
+				
+				let value = (i.bits == 1) ? !!v : v;
+				
+				if (count > 1) {
+					result[i.name].push(value);
+				} else {
+					result[i.name] = value;
+				}
+			}
+		}
+		
+		return result;
+	}
+
+	this.flags = _dec_flags(buf.splice(0, Math.ceil(flags_descriptor.reduce((b, a) => b + a.bits * (a.count || 1), 0) / 8)));
+	
+	this.points = (v => v[0] | (v[1] << 8))(buf.splice(0,2));
+	
+	this.lives = buf.shift();
+	
+	this.trinket_seed = buf.shift();
+	
+	this.trinket_count = buf.shift();
+	
+	function Level(v){
+		this.completed = !!(v >> 3 & 1);
+		this.tickets = [
+			!!(v >> 2 & 1),
+			!!(v >> 1 & 1),
+			!!(v & 1),
+		]
+	}
+
+	this.levels = buf.splice(0, 5).flatMap(v => [new Level(v >> 4), new Level(v & 15)]);
+
+	this.getPallete = function(){
+		const colors = [];
+
+		for (let i of this.palette){
+			colors.push(`hsl(${(i & 31) * 360 / 32}, 100%, ${(i >> 5) * 100 / 8}%)`);
+		}
+
+		return colors;
+	}
+
+	this.get_trinket_mapping = function(){
+		let result = new Array(TOTAL_TRINKETS).fill(0);
+		
+		for (let i = 0; i < TOTAL_TRINKETS; i++){
+			let j = (((((Math.sin(i * this.trinket_seed) * 8192) % 1) + 1) % 1) * i) | 0;
+
+			if (j != i) result[i] = result[j];
+			
+			result[j] = i;
+		}
+		
+		return result;
+	}
+
+	this.get_collected_trinkets = function(){
+		let mapping = this.get_trinket_mapping();
+		
+		let result = new Array(TOTAL_TRINKETS).fill(false);
+		
+		for (let i = 0; i < this.trinket_count; i++){
+			result[mapping[i]] = true;
+		}
+
+		return result;
+	}
+}
+
+
+
+let hash = Array.from(atob(window.location.hash.substring(1)), c => c.charCodeAt(0));
+
+let save = new SaveFile(hash);
+console.log(save);
+
+const download = document.getElementById("download");
+download.href = URL.createObjectURL(new Blob(new Uint8Array(hash)));
+download.innerText = `[download ${save.name}.sav]`;
+download.download = `${save.name}.sav`;
+
+const data = document.getElementById("words");
+
+data.innerText = JSON.stringify(save);
+
+const canvas = document.getElementById("emblem");
+const ctx = canvas.getContext("2d");
+
+
+const colors = save.getPallete();
+
+for (let i = 0; i < 10; i++){
+	for (let j = 0; j < 10; j++){
+		ctx.fillStyle = colors[save.emblem[i][j]];
+		ctx.fillRect(j, i, 1, 1);
+	}
+}
+
+for (let i of save.get_trinket_mapping().slice(0, this.trinket_count)){
+	document.querySelector(`#trinkets :nth-child(${i + 1})`).classList.add("collected");
+}
+
+</script>
